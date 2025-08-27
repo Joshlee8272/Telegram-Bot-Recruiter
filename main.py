@@ -4,20 +4,36 @@ from flask import Flask
 import threading
 
 # === CONFIG ===
-TOKEN = "8430159328:AAEgNPMo1HDsCHAY17NTDiYj2N-wfX39t7c"  # Replace with your bot token
-OWNER_ID = 7301067810      # Replace with your Telegram ID
-CHANNEL_LINK = "https://t.me/+Z3UYgD14if43NTJl"  # Replace with your channel link
+TOKEN = "8430159328:AAEgNPMo1HDsCHAY17NTDiYj2N-wfX39t7c"
+OWNER_ID = 7301067810
+CHANNEL_LINK = "https://t.me/+Z3UYgD14if43NTJl"
 
 bot = telebot.TeleBot(TOKEN)
 
-# Store applications temporarily
+# Data storage
 applications = {}
+accepted_users = set()
+rejected_users = set()
 
 # === START COMMAND ===
 @bot.message_handler(commands=['start'])
 def start(msg):
     user_id = msg.chat.id
+
+    if user_id in accepted_users:
+        bot.send_message(user_id, f"✅ You are already accepted!\n\nHere’s the channel link: {CHANNEL_LINK}")
+        return
+    if user_id in rejected_users:
+        bot.send_message(user_id, "🚫 You have already been rejected. You cannot reapply.")
+        return
+
+    # Require username
+    if not msg.from_user.username:
+        bot.send_message(user_id, "⚠️ You need a Telegram username to apply.\n\nPlease set one in Telegram settings and try again.")
+        return
+
     applications[user_id] = {}
+
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("✅ Yes", callback_data="dev_yes"),
@@ -32,12 +48,59 @@ def start(msg):
         parse_mode="Markdown"
     )
 
+# === HELP COMMAND ===
+@bot.message_handler(commands=['help'])
+def help_cmd(msg):
+    bot.send_message(
+        msg.chat.id,
+        "📖 *Bot Commands*\n\n"
+        "/start - Begin application process\n"
+        "/help - Show this help menu\n\n"
+        "👑 *Owner Only:*\n"
+        "/stats - View stats of applications\n"
+        "/broadcast <message> - Send a message to all accepted users",
+        parse_mode="Markdown"
+    )
+
+# === OWNER STATS COMMAND ===
+@bot.message_handler(commands=['stats'])
+def stats_cmd(msg):
+    if msg.chat.id != OWNER_ID:
+        return
+    bot.send_message(
+        msg.chat.id,
+        f"📊 *Bot Stats*\n\n"
+        f"👥 Total Applications: {len(applications)}\n"
+        f"✅ Accepted: {len(accepted_users)}\n"
+        f"❌ Rejected: {len(rejected_users)}",
+        parse_mode="Markdown"
+    )
+
+# === BROADCAST COMMAND ===
+@bot.message_handler(commands=['broadcast'])
+def broadcast_cmd(msg):
+    if msg.chat.id != OWNER_ID:
+        return
+    text = msg.text.replace("/broadcast", "").strip()
+    if not text:
+        bot.send_message(OWNER_ID, "⚠️ Please provide a message.\nUsage: `/broadcast Hello devs!`", parse_mode="Markdown")
+        return
+
+    count = 0
+    for uid in accepted_users:
+        try:
+            bot.send_message(uid, f"📢 *Announcement:*\n\n{text}", parse_mode="Markdown")
+            count += 1
+        except:
+            pass
+    bot.send_message(OWNER_ID, f"✅ Broadcast sent to {count} users.")
+
 # === HANDLE RESPONSES ===
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
     user_id = call.message.chat.id
 
-    # Q1 - Are you developer?
+    # Developer Question
     if call.data == "dev_yes":
         applications[user_id]["developer"] = "Yes"
         markup = InlineKeyboardMarkup()
@@ -48,22 +111,18 @@ def callback(call):
         bot.edit_message_text(
             "🎮 Great! Next question:\n\n"
             "❓ Do you *own a Roblox game* (published or in-progress)?",
-            user_id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
+            user_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown"
         )
 
     elif call.data == "dev_no":
         applications[user_id]["developer"] = "No"
+        rejected_users.add(user_id)
         bot.edit_message_text(
             "❌ Sorry, only *Roblox developers* are allowed to join.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
+            user_id, call.message.message_id, parse_mode="Markdown"
         )
 
-    # Q2 - Own a Roblox game?
+    # Own Game Question
     elif call.data in ["own_yes", "own_no"]:
         applications[user_id]["owns_game"] = "Yes" if call.data == "own_yes" else "No"
         rules_text = (
@@ -81,30 +140,20 @@ def callback(call):
             InlineKeyboardButton("✅ Yes, I Agree", callback_data="rules_yes"),
             InlineKeyboardButton("❌ No", callback_data="rules_no")
         )
-        bot.edit_message_text(
-            rules_text,
-            user_id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        bot.edit_message_text(rules_text, user_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
-    # Q3 - Accept rules?
+    # Rules Agreement
     elif call.data == "rules_yes":
         applications[user_id]["rules"] = "Yes"
         bot.edit_message_text(
-            "✅ Thank you! 🎉\n\n"
-            "Your application has been submitted and will be reviewed by our team.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
+            "✅ Thank you! 🎉\n\nYour application has been submitted and will be reviewed by our team.",
+            user_id, call.message.message_id, parse_mode="Markdown"
         )
 
-        # Send application to OWNER for review
         app = applications[user_id]
         app_text = (
             "📨 *New Application Submitted*\n\n"
-            f"👤 User: @{call.from_user.username or 'No Username'}\n"
+            f"👤 User: @{call.from_user.username}\n"
             f"🆔 User ID: {user_id}\n\n"
             f"👾 Developer: {app['developer']}\n"
             f"🎮 Owns Game: {app['owns_game']}\n"
@@ -114,50 +163,43 @@ def callback(call):
         markup = InlineKeyboardMarkup()
         markup.add(
             InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
+            InlineKeyboardButton("❌ Reject (Fake Dev)", callback_data=f"reject_{user_id}_fake"),
+            InlineKeyboardButton("❌ Reject (No Game)", callback_data=f"reject_{user_id}_nogame"),
+            InlineKeyboardButton("❌ Reject (Other)", callback_data=f"reject_{user_id}_other")
         )
         bot.send_message(OWNER_ID, app_text, reply_markup=markup, parse_mode="Markdown")
 
     elif call.data == "rules_no":
         applications[user_id]["rules"] = "No"
+        rejected_users.add(user_id)
         bot.edit_message_text(
             "❌ You must agree to the rules to join our community.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
+            user_id, call.message.message_id, parse_mode="Markdown"
         )
 
-    # === OWNER DECISIONS ===
+    # OWNER DECISIONS
     elif call.data.startswith("accept_"):
         target_id = int(call.data.split("_")[1])
+        accepted_users.add(target_id)
         bot.send_message(
             target_id,
-            f"🎉 *Congratulations!* 🎉\n\n"
-            f"Your application has been *accepted* ✅\n\n"
-            f"Here’s the channel link: 👉 {CHANNEL_LINK}",
+            f"🎉 *Congratulations!* 🎉\n\nYour application has been *accepted* ✅\n\nHere’s the channel link: 👉 {CHANNEL_LINK}",
             parse_mode="Markdown"
         )
-        bot.edit_message_text(
-            "✅ Application has been *accepted*. The user has received the channel link.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+        bot.edit_message_text("✅ Application has been *accepted*.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
     elif call.data.startswith("reject_"):
-        target_id = int(call.data.split("_")[1])
+        parts = call.data.split("_")
+        target_id = int(parts[1])
+        reason = parts[2] if len(parts) > 2 else "Not specified"
+        rejected_users.add(target_id)
+
         bot.send_message(
             target_id,
-            "❌ Sorry, your application has been *rejected*.\n\n"
-            "You may try again later if you meet the requirements.",
+            f"❌ Sorry, your application has been *rejected*.\n\nReason: {reason.capitalize()}",
             parse_mode="Markdown"
         )
-        bot.edit_message_text(
-            "🚫 Application has been *rejected*.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+        bot.edit_message_text(f"🚫 Application has been *rejected* ({reason}).", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # === FLASK KEEP-ALIVE SERVER ===
 app = Flask('')
