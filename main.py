@@ -1,178 +1,131 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask
-import threading
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-# === CONFIG ===
-TOKEN = "8430159328:AAEgNPMo1HDsCHAY17NTDiYj2N-wfX39t7c"  # Replace with your bot token
-OWNER_ID = 7301067810      # Replace with your Telegram ID
-CHANNEL_LINK = "https://t.me/+Z3UYgD14if43NTJl"  # Replace with your channel link
+# ====== CONFIG ======
+TOKEN = "430159328:AAEgNPMo1HDsCHAY17NTDiYj2N-wfX39t7c"  # Replace with your bot token
+ADMIN_ID = 7301067810     # Replace with your Telegram ID
+CHANNEL_LINK = "https://t.me/+Z3UYgD14if43NTJl"  # Replace with your TG channel link
+# ====================
 
-bot = telebot.TeleBot(TOKEN)
-
-# Store applications temporarily
+# Track user states and accepted users
+user_states = {}
 applications = {}
+accepted_users = set()
 
-# === START COMMAND ===
-@bot.message_handler(commands=['start'])
-def start(msg):
-    user_id = msg.chat.id
-    applications[user_id] = {}
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("✅ Yes", callback_data="dev_yes"),
-        InlineKeyboardButton("❌ No", callback_data="dev_no")
-    )
-    bot.send_message(
-        user_id,
-        "👋 *Welcome to Roblox Dev Recruiter Bot!*\n\n"
-        "We only accept *real Roblox developers* into our community.\n\n"
-        "❓ Are you a *Roblox Game Developer?*",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+logging.basicConfig(level=logging.INFO)
 
-# === HANDLE RESPONSES ===
-@bot.callback_query_handler(func=lambda call: True)
-def callback(call):
-    user_id = call.message.chat.id
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in accepted_users:
+        await update.message.reply_text("✅ You are already accepted and have access to the channel.")
+        return
+    
+    keyboard = [[InlineKeyboardButton("Yes ✅", callback_data="dev_yes"),
+                 InlineKeyboardButton("No ❌", callback_data="dev_no")]]
+    await update.message.reply_text("👋 Welcome!\n\nAre you a Roblox Game Developer?", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_states[user_id] = "Q1"
 
-    # Q1 - Are you developer?
-    if call.data == "dev_yes":
-        applications[user_id]["developer"] = "Yes"
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("✅ Yes", callback_data="own_yes"),
-            InlineKeyboardButton("❌ No", callback_data="own_no")
-        )
-        bot.edit_message_text(
-            "🎮 Great! Next question:\n\n"
-            "❓ Do you *own a Roblox game* (published or in-progress)?",
-            user_id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
 
-    elif call.data == "dev_no":
-        applications[user_id]["developer"] = "No"
-        bot.edit_message_text(
-            "❌ Sorry, only *Roblox developers* are allowed to join.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+    if user_id in accepted_users:
+        await query.edit_message_text("✅ You are already accepted.")
+        return
 
-    # Q2 - Own a Roblox game?
-    elif call.data in ["own_yes", "own_no"]:
-        applications[user_id]["owns_game"] = "Yes" if call.data == "own_yes" else "No"
+    if query.data == "dev_yes":
+        applications[user_id] = {"developer": "Yes"}
+        keyboard = [[InlineKeyboardButton("Yes ✅", callback_data="own_yes"),
+                     InlineKeyboardButton("No ❌", callback_data="own_no")]]
+        await query.edit_message_text("Do you own some Roblox Game?", reply_markup=InlineKeyboardMarkup(keyboard))
+        user_states[user_id] = "Q2"
+    
+    elif query.data == "dev_no":
+        applications[user_id] = {"developer": "No"}
+        await query.edit_message_text("❌ Sorry, this group is only for Roblox developers.")
+
+    elif query.data == "own_yes":
+        applications[user_id]["owns_game"] = "Yes"
+        await query.edit_message_text("📝 Please write a short letter about yourself and your Roblox projects.")
+        user_states[user_id] = "LETTER"
+    
+    elif query.data == "own_no":
+        applications[user_id]["owns_game"] = "No"
+        await query.edit_message_text("📝 Please write a short letter about yourself and your Roblox interest.")
+        user_states[user_id] = "LETTER"
+    
+    elif query.data == "rules_yes":
+        applications[user_id]["rules"] = "Agreed"
+        # Send application to admin
+        text = f"📩 New Application from @{query.from_user.username or query.from_user.first_name} (ID: {user_id})\n\n"
+        for k, v in applications[user_id].items():
+            text += f"{k.capitalize()}: {v}\n"
+        await context.bot.send_message(ADMIN_ID, text + "\n\nUse /accept <id> or /reject <id>")
+        await query.edit_message_text("✅ Thank you! Your application has been sent for review.")
+        user_states[user_id] = "WAIT"
+
+    elif query.data == "rules_no":
+        await query.edit_message_text("❌ You must agree to the rules to continue.")
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in user_states:
+        return
+
+    if user_states[user_id] == "LETTER":
+        applications[user_id]["letter"] = update.message.text
+        keyboard = [[InlineKeyboardButton("I Agree ✅", callback_data="rules_yes"),
+                     InlineKeyboardButton("I Disagree ❌", callback_data="rules_no")]]
         rules_text = (
-            "📜 *Channel Rules*\n\n"
-            "1️⃣ Must be a *Roblox Developer* (scripter, builder, UI, etc.)\n"
-            "2️⃣ Respect everyone, no toxicity 🚫\n"
-            "3️⃣ Only share *safe & useful* Roblox files (no exploits/malware)\n"
-            "4️⃣ No spam or self-promotion 🚫\n"
-            "5️⃣ Credit creators if you share their work ✨\n"
-            "6️⃣ Admins’ decision is final 👑\n\n"
-            "❓ Are you willing to *follow our rules?*"
+            "📜 Rules for Joining:\n\n"
+            "1. Must be a Roblox Game Developer.\n"
+            "2. Respect all members.\n"
+            "3. Share files/resources responsibly.\n"
+            "4. No spam or self-promotion.\n\n"
+            "👉 Do you agree to follow these rules?"
         )
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("✅ Yes, I Agree", callback_data="rules_yes"),
-            InlineKeyboardButton("❌ No", callback_data="rules_no")
-        )
-        bot.edit_message_text(
-            rules_text,
-            user_id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(rules_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        user_states[user_id] = "RULES"
 
-    # Q3 - Accept rules?
-    elif call.data == "rules_yes":
-        applications[user_id]["rules"] = "Yes"
-        bot.edit_message_text(
-            "✅ Thank you! 🎉\n\n"
-            "Your application has been submitted and will be reviewed by our team.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+# === ADMIN COMMANDS ===
+async def accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    try:
+        user_id = int(context.args[0])
+        if user_id in accepted_users:
+            await update.message.reply_text("⚠️ User already accepted.")
+            return
+        accepted_users.add(user_id)
+        await context.bot.send_message(user_id, f"🎉 Congratulations! You have been accepted.\n\nHere is your invite link:\n{CHANNEL_LINK}")
+        await update.message.reply_text("✅ User accepted and link sent.")
+    except:
+        await update.message.reply_text("Usage: /accept <user_id>")
 
-        # Send application to OWNER for review
-        app = applications[user_id]
-        app_text = (
-            "📨 *New Application Submitted*\n\n"
-            f"👤 User: @{call.from_user.username or 'No Username'}\n"
-            f"🆔 User ID: {user_id}\n\n"
-            f"👾 Developer: {app['developer']}\n"
-            f"🎮 Owns Game: {app['owns_game']}\n"
-            f"📜 Agreed Rules: {app['rules']}\n\n"
-            "Do you want to approve this application?"
-        )
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("✅ Accept", callback_data=f"accept_{user_id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user_id}")
-        )
-        bot.send_message(OWNER_ID, app_text, reply_markup=markup, parse_mode="Markdown")
+async def reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    try:
+        user_id = int(context.args[0])
+        await context.bot.send_message(user_id, "❌ Sorry, your application was rejected.")
+        await update.message.reply_text("🚫 User rejected.")
+    except:
+        await update.message.reply_text("Usage: /reject <user_id>")
 
-    elif call.data == "rules_no":
-        applications[user_id]["rules"] = "No"
-        bot.edit_message_text(
-            "❌ You must agree to the rules to join our community.",
-            user_id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+# === MAIN ===
+def main():
+    app = Application.builder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(CommandHandler("accept", accept))
+    app.add_handler(CommandHandler("reject", reject))
 
-    # === OWNER DECISIONS ===
-    elif call.data.startswith("accept_"):
-        target_id = int(call.data.split("_")[1])
-        bot.send_message(
-            target_id,
-            f"🎉 *Congratulations!* 🎉\n\n"
-            f"Your application has been *accepted* ✅\n\n"
-            f"Here’s the channel link: 👉 {CHANNEL_LINK}",
-            parse_mode="Markdown"
-        )
-        bot.edit_message_text(
-            "✅ Application has been *accepted*. The user has received the channel link.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
+    app.run_polling()
 
-    elif call.data.startswith("reject_"):
-        target_id = int(call.data.split("_")[1])
-        bot.send_message(
-            target_id,
-            "❌ Sorry, your application has been *rejected*.\n\n"
-            "You may try again later if you meet the requirements.",
-            parse_mode="Markdown"
-        )
-        bot.edit_message_text(
-            "🚫 Application has been *rejected*.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
-
-# === FLASK KEEP-ALIVE SERVER ===
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-def run():
-    app.run(host="0.0.0.0", port=8080)
-
-def start_bot():
-    bot.infinity_polling()
-
-# Run bot + webserver in parallel
 if __name__ == "__main__":
-    threading.Thread(target=run).start()
-    threading.Thread(target=start_bot).start()
+    main()
